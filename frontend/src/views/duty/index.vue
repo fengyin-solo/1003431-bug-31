@@ -114,9 +114,12 @@ function openCreate() {
 
 function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
-  const result = applyAction(meta.key, Number(row.id), action)
+  // 换岗待办可能由检查站联动改动，提交时带版本号，被另一端抢先就拒绝并刷新。
+  const expectedRev = typeof row.rev === 'number' ? row.rev : 0
+  const result = applyAction(meta.key, Number(row.id), action, expectedRev)
   if (!result.ok) {
     errorMessage.value = result.message
+    reload()
     return
   }
   reload()

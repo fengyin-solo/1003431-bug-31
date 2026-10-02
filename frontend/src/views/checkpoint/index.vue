@@ -47,7 +47,7 @@
           <td>{{ row.status }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in actionsFor(row)"
               :key="action"
               class="link"
               type="button"
@@ -55,6 +55,7 @@
             >
               {{ action }}
             </button>
+            <span v-if="!actionsFor(row).length" class="empty-state">暂无可执行动作</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -74,18 +75,18 @@
 import { computed, onMounted, ref } from 'vue'
 
 import {
+  availableActions,
   downloadEntries,
   listEntries,
   moduleMeta,
   runAction as applyAction,
 } from '@/api/local-service'
+import { FIELD_SOURCES, STATUS_NORMAL, parseCount } from '@/data/checkpoint-rules'
 import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('checkpoint')
 const columns = ["站点编号", "站点位置", "值守人员", "检查项目", "通行车辆数", "收缴火种数", "值班日期", "运行状态"]
-const actions = ["升级检查", "关闭站点", "安排换岗"]
 const statuses = ["正常检查", "临时关闭", "升级检查", "等待换岗"]
-const stats = [{"label": "站点总数", "value": 0}, {"label": "正常检查数", "value": 0}, {"label": "收缴火种数", "value": 0}]
 
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
@@ -98,6 +99,22 @@ const statusSummary = computed(() =>
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
+// 统计卡片与表格、状态图例走同一份 rows，避免面板结果和站点列表各说各话。
+const stats = computed(() => [
+  { label: '站点总数', value: rows.value.length },
+  {
+    label: '正常检查数',
+    value: rows.value.filter((row) => String(row.status) === STATUS_NORMAL).length,
+  },
+  {
+    label: '收缴火种数',
+    value: rows.value.reduce((sum, row) => sum + parseCount(row[FIELD_SOURCES]), 0),
+  },
+])
+
+function actionsFor(row: EntryRow): string[] {
+  return availableActions(meta.key, row)
+}
 
 function resetFilters() {
   filters.value = {}
@@ -114,9 +131,13 @@ function openCreate() {
 
 function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
-  const result = applyAction(meta.key, Number(row.id), action)
+  // 带着读到的版本号提交：另一端先改过就判并发冲突，本次提交不生效。
+  const expectedRev = typeof row.rev === 'number' ? row.rev : 0
+  const result = applyAction(meta.key, Number(row.id), action, expectedRev)
   if (!result.ok) {
     errorMessage.value = result.message
+    // 冲突或被规则拒绝时都重新拉取最新状态，失败重试必须基于新状态而不是旧快照。
+    reload()
     return
   }
   reload()
