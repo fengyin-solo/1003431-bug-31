@@ -22,6 +22,9 @@
       <span v-for="item in statusSummary" :key="item.status" class="legend-item">
         {{ item.status }}：{{ item.count }}
       </span>
+      <span class="legend-item legend-rule">
+        判定规则：关闭站点停止检查并清零通行与火种；升级检查为最高档；换岗生成值勤待办，冲突时以更严格检查标准为准
+      </span>
     </p>
 
     <form class="filter-bar" @submit.prevent="reload">
@@ -46,15 +49,18 @@
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
-            <button
-              v-for="action in actions"
-              :key="action"
-              class="link"
-              type="button"
-              @click="runAction(action, row)"
-            >
-              {{ action }}
-            </button>
+            <template v-for="action in availableActions(row)" :key="action">
+              <button
+                class="link"
+                type="button"
+                :disabled="busyKey === actionKey(action, row)"
+                :title="busyKey === actionKey(action, row) ? '正在提交…' : ''"
+                @click="runAction(action, row)"
+              >
+                {{ action }}
+              </button>
+            </template>
+            <span v-if="!availableActions(row).length" class="muted-text">—</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -71,33 +77,60 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import {
+  CP_ACTION,
   downloadEntries,
   listEntries,
   moduleMeta,
   runAction as applyAction,
 } from '@/api/local-service'
+import { guardAction } from '@/data/checkpoint-rules'
+import { useOpsStore } from '@/stores/ops'
 import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('checkpoint')
 const columns = ["站点编号", "站点位置", "值守人员", "检查项目", "通行车辆数", "收缴火种数", "值班日期", "运行状态"]
-const actions = ["升级检查", "关闭站点", "安排换岗"]
-const statuses = ["正常检查", "临时关闭", "升级检查", "等待换岗"]
-const stats = [{"label": "站点总数", "value": 0}, {"label": "正常检查数", "value": 0}, {"label": "收缴火种数", "value": 0}]
+const statuses = ["正常检查", "升级检查", "等待换岗", "临时关闭"]
+const ops = useOpsStore()
 
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const busyKey = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+// 通行面板：直接读共享运营状态，与站点导航、升级入口同源。
+const stats = computed(() => [
+  { label: '站点总数', value: ops.checkpointTotal },
+  { label: '正常检查数', value: ops.normalCount },
+  { label: '收缴火种数', value: ops.fireTakenTotal },
+])
+
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
     status,
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
+
+// 按当前状态判定可用动作：关闭的站点不显示升级/换岗入口，只有恢复开放。
+function availableActions(row: EntryRow): string[] {
+  const candidates = [
+    CP_ACTION.escalate,
+    CP_ACTION.close,
+    CP_ACTION.relieve,
+    CP_ACTION.completeRelief,
+    CP_ACTION.reopen,
+  ]
+  return candidates.filter((action) => guardAction(action, row) === null)
+}
+
+function actionKey(action: string, row: EntryRow): string {
+  return `${action}:${row.id}`
+}
 
 function resetFilters() {
   filters.value = {}
@@ -114,12 +147,18 @@ function openCreate() {
 
 function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
-  const result = applyAction(meta.key, Number(row.id), action)
-  if (!result.ok) {
-    errorMessage.value = result.message
-    return
+  busyKey.value = actionKey(action, row)
+  try {
+    // 携带行版本：另一值守端若已提交，本次并发提交会被乐观锁拒绝，只允许一次生效。
+    const result = applyAction(meta.key, Number(row.id), action, row.version ?? 0)
+    if (!result.ok) {
+      errorMessage.value = result.message
+      return
+    }
+    reload()
+  } finally {
+    busyKey.value = ''
   }
-  reload()
 }
 
 function reload() {
@@ -128,10 +167,25 @@ function reload() {
     const payload = listEntries(meta.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
+    ops.refresh()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '防火检查站列表读取失败'
   }
 }
 
-onMounted(reload)
+function onExternalChange(event: StorageEvent) {
+  // 另一值守端（跨标签页）提交后，本端列表与入口立即对齐，避免按旧状态操作。
+  if (event.key && event.key.includes('entries')) {
+    reload()
+  }
+}
+
+onMounted(() => {
+  reload()
+  window.addEventListener('storage', onExternalChange)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('storage', onExternalChange)
+})
 </script>

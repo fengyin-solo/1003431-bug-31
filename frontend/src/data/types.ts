@@ -5,7 +5,12 @@ export type EntryRow = {
   status: string
   pending: boolean
   abnormal: boolean
-  [field: string]: string | number | boolean
+  /** 乐观锁版本：每次写入 +1。undefined 视为 0（旧数据/种子数据）。 */
+  version?: number
+  /** 跨模块联动时标记来源，例如值勤排班里由检查站换岗生成的待办。 */
+  sourceModule?: string
+  sourceId?: number
+  [field: string]: string | number | boolean | undefined
 }
 
 export type ModuleMeta = {

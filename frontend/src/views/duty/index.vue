@@ -51,6 +51,7 @@
               :key="action"
               class="link"
               type="button"
+              :disabled="busyKey === `${action}:${row.id}`"
               @click="runAction(action, row)"
             >
               {{ action }}
@@ -71,7 +72,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import {
   downloadEntries,
@@ -85,11 +86,11 @@ const meta = moduleMeta('duty')
 const columns = ["排班编号", "值勤日期", "值勤时段", "值勤岗位", "值勤人员", "接班人员", "交接记录", "排班状态"]
 const actions = ["确认排班", "记录交接", "申请调班"]
 const statuses = ["待确认", "已确认", "值勤中", "已交接", "已调班"]
-const stats = [{"label": "今日值勤人数", "value": 0}, {"label": "待交接次数", "value": 0}, {"label": "调班申请数", "value": 0}]
 
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const busyKey = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
 const statusSummary = computed(() =>
@@ -98,6 +99,13 @@ const statusSummary = computed(() =>
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
+
+// 换岗待办由检查站联动生成（排班编号 CHEC-RELIEF-*），待交接次数必须跟着检查站状态变化。
+const stats = computed(() => [
+  { label: '今日值勤人数', value: rows.value.length },
+  { label: '待交接次数', value: rows.value.filter((row) => row.pending).length },
+  { label: '调班申请数', value: rows.value.filter((row) => String(row.status) === '已调班').length },
+])
 
 function resetFilters() {
   filters.value = {}
@@ -114,12 +122,18 @@ function openCreate() {
 
 function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
-  const result = applyAction(meta.key, Number(row.id), action)
-  if (!result.ok) {
-    errorMessage.value = result.message
-    return
+  busyKey.value = `${action}:${row.id}`
+  try {
+    // 携带版本号：两个值守端并发确认同一条换岗待办，只有第一次提交生效。
+    const result = applyAction(meta.key, Number(row.id), action, row.version ?? 0)
+    if (!result.ok) {
+      errorMessage.value = result.message
+      return
+    }
+    reload()
+  } finally {
+    busyKey.value = ''
   }
-  reload()
 }
 
 function reload() {
@@ -133,5 +147,18 @@ function reload() {
   }
 }
 
-onMounted(reload)
+function onExternalChange(event: StorageEvent) {
+  if (event.key && event.key.includes('entries')) {
+    reload()
+  }
+}
+
+onMounted(() => {
+  reload()
+  window.addEventListener('storage', onExternalChange)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('storage', onExternalChange)
+})
 </script>
